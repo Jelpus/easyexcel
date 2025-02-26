@@ -3,6 +3,7 @@ const axios = require("axios");
 const xlsx = require("xlsx");
 const fs = require("fs");
 const tmp = require("tmp");
+const { Readable } = require("stream");
 
 const app = express();
 app.use(express.json());
@@ -24,7 +25,7 @@ app.post("/convert", async (req, res) => {
 
         writer.on("finish", () => {
             try {
-                const workbook = xlsx.readFile(tempFile.name, { dense: true }); // Dense: optimiza memoria
+                const workbook = xlsx.readFile(tempFile.name, { dense: true }); // Optimiza memoria
                 const sheets = workbook.SheetNames;
 
                 if (sheets.length === 0) {
@@ -34,36 +35,47 @@ app.post("/convert", async (req, res) => {
                 const selectedSheet = sheets[0];
                 const sheet = workbook.Sheets[selectedSheet];
 
-                // 🔹 Extraer datos en formato de matriz (cada fila como array)
+                // 🔹 Usar Streaming para procesar fila por fila
                 const rawData = xlsx.utils.sheet_to_json(sheet, { header: 1 });
 
-                // 🔹 Verificar si hay contenido
                 if (rawData.length < 2) {
                     return res.status(400).json({ error: "El archivo no contiene datos suficientes." });
                 }
 
-                // 🔹 Tomar la primera fila como encabezados y convertir el resto a objetos
-                const headers = rawData[0]; // Primera fila = claves
-                const jsonData = rawData.slice(1).map(row => {
-                    let obj = {};
-                    row.forEach((cell, index) => {
-                        obj[headers[index] || `Column${index + 1}`] = cell || null;
-                    });
-                    return obj;
+                const headers = rawData[0]; // Primera fila = encabezados
+                const totalRows = rawData.length - 1; // Excluyendo encabezados
+
+                res.setHeader("Content-Type", "application/json");
+                res.write(`{"sheet": "${selectedSheet}", "totalRows": ${totalRows}, "batchSize": ${batchSize}, "data": [`);
+
+                let firstRow = true;
+                let index = 0;
+
+                const readStream = new Readable({
+                    read() {
+                        while (index < totalRows) {
+                            const rowData = rawData[index + 1].map((cell, i) => ({
+                                [headers[i] || `Column${i + 1}`]: cell || null,
+                            }));
+                            const jsonRow = JSON.stringify(Object.assign({}, ...rowData));
+
+                            if (!firstRow) this.push(",");
+                            this.push(jsonRow);
+
+                            firstRow = false;
+                            index++;
+
+                            if (index % batchSize === 0) break; // Enviar en bloques de `batchSize`
+                        }
+
+                        if (index >= totalRows) {
+                            this.push("]}");
+                            this.push(null); // Fin del stream
+                        }
+                    },
                 });
 
-                // 🔹 Aplicar paginación
-                const paginatedData = jsonData.slice(0, batchSize);
-                const hasNextPage = jsonData.length > batchSize;
-
-                res.json({
-                    sheet: selectedSheet,
-                    totalRows: jsonData.length,
-                    batchSize,
-                    hasNextPage,
-                    nextPage: hasNextPage ? `/convert?fileUrl=${encodeURIComponent(fileUrl)}&offset=${batchSize}` : null,
-                    data: paginatedData
-                });
+                readStream.pipe(res);
 
             } catch (error) {
                 res.status(500).json({ error: "Error al procesar el archivo.", details: error.message });
