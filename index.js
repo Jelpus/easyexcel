@@ -8,7 +8,7 @@ const { Readable } = require("stream");
 const app = express();
 app.use(express.json());
 
-const batchSize = 500; // Número de filas por lote para archivos grandes
+const batchSize = 500; // Número de filas por lote para evitar consumir mucha memoria
 
 app.post("/convert", async (req, res) => {
     try {
@@ -25,7 +25,7 @@ app.post("/convert", async (req, res) => {
 
         writer.on("finish", () => {
             try {
-                const workbook = xlsx.readFile(tempFile.name, { dense: true }); // Optimiza memoria
+                const workbook = xlsx.readFile(tempFile.name, { dense: true }); // Optimizamos la lectura
                 const sheets = workbook.SheetNames;
 
                 if (sheets.length === 0) {
@@ -35,7 +35,7 @@ app.post("/convert", async (req, res) => {
                 const selectedSheet = sheets[0];
                 const sheet = workbook.Sheets[selectedSheet];
 
-                // 🔹 Usar Streaming para procesar fila por fila
+                // 🔹 Leer Excel con streaming
                 const rawData = xlsx.utils.sheet_to_json(sheet, { header: 1 });
 
                 if (rawData.length < 2) {
@@ -45,6 +45,7 @@ app.post("/convert", async (req, res) => {
                 const headers = rawData[0]; // Primera fila = encabezados
                 const totalRows = rawData.length - 1; // Excluyendo encabezados
 
+                // 🔹 Respuesta en Streaming
                 res.setHeader("Content-Type", "application/json");
                 res.write(`{"sheet": "${selectedSheet}", "totalRows": ${totalRows}, "batchSize": ${batchSize}, "data": [`);
 
@@ -54,13 +55,13 @@ app.post("/convert", async (req, res) => {
                 const readStream = new Readable({
                     read() {
                         while (index < totalRows) {
-                            const rowData = rawData[index + 1].map((cell, i) => ({
-                                [headers[i] || `Column${i + 1}`]: cell || null,
-                            }));
-                            const jsonRow = JSON.stringify(Object.assign({}, ...rowData));
+                            const rowData = rawData[index + 1].reduce((acc, cell, i) => {
+                                acc[headers[i] || `Column${i + 1}`] = cell || null;
+                                return acc;
+                            }, {});
 
                             if (!firstRow) this.push(",");
-                            this.push(jsonRow);
+                            this.push(JSON.stringify(rowData));
 
                             firstRow = false;
                             index++;
