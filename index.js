@@ -7,79 +7,99 @@ const tmp = require("tmp");
 const app = express();
 app.use(express.json());
 
+const batchSize = 500; // Número de filas por lote para archivos grandes
+
 app.post("/convert", async (req, res) => {
     try {
         const { fileUrl } = req.body;
-        const batchSize = 500; // Número de filas por lote
-
         if (!fileUrl) return res.status(400).json({ error: "Debes proporcionar una URL válida." });
 
-        // Crear un archivo temporal para almacenar el Excel descargado
+        // Responde rápido para evitar timeout en Render
+        res.json({ message: "Procesando archivo, consulta en 10s.", status: "processing" });
+
+        // Procesa el archivo en segundo plano
+        processFile(fileUrl);
+
+    } catch (error) {
+        res.status(500).json({ error: "Error al iniciar el procesamiento.", details: error.message });
+    }
+});
+
+async function processFile(fileUrl) {
+    try {
         const tempFile = tmp.fileSync({ postfix: ".xlsx" });
 
-        // Descargar el archivo sin cargarlo en memoria
+        // Descargar el archivo sin bloquear la memoria
         const writer = fs.createWriteStream(tempFile.name);
         const response = await axios.get(fileUrl, { responseType: "stream" });
         response.data.pipe(writer);
 
         writer.on("finish", () => {
             try {
-                // Leer el archivo en modo eficiente
                 const workbook = xlsx.readFile(tempFile.name);
                 const sheets = workbook.SheetNames;
 
                 if (sheets.length === 0) {
-                    return res.status(400).json({ error: "El archivo Excel no contiene hojas." });
+                    console.error("El archivo Excel no contiene hojas.");
+                    return;
                 }
 
-                const selectedSheet = sheets[0]; // Toma la primera hoja automáticamente
+                const selectedSheet = sheets[0]; // Primera hoja automáticamente
                 const sheet = workbook.Sheets[selectedSheet];
                 const jsonData = xlsx.utils.sheet_to_json(sheet);
 
-                // Si el archivo tiene menos de `batchSize` filas, devolver todo sin paginación
+                // Si el archivo tiene menos de `batchSize` filas, procesar todo de una vez
                 if (jsonData.length <= batchSize) {
-                    return res.json({ 
-                        sheet: selectedSheet, 
-                        totalRows: jsonData.length, 
-                        hasNextPage: false,
-                        data: jsonData 
-                    });
+                    console.log("Archivo procesado:", { sheet: selectedSheet, totalRows: jsonData.length });
+                    return;
                 }
 
-                // Si hay más filas, devolver solo `batchSize` filas con info para seguir paginando
-                const paginatedData = jsonData.slice(0, batchSize);
-
-                res.json({
-                    sheet: selectedSheet,
-                    totalRows: jsonData.length,
-                    batchSize,
-                    hasNextPage: true,
-                    nextPage: `/convert?fileUrl=${encodeURIComponent(fileUrl)}&offset=${batchSize}`,
-                    data: paginatedData,
-                });
+                // Si hay más datos, procesarlos por lotes
+                console.log("Archivo grande detectado, procesando por lotes...");
+                processPaginated(fileUrl, selectedSheet, jsonData);
 
             } catch (error) {
-                res.status(500).json({ error: "Error al procesar el archivo.", details: error.message });
+                console.error("Error al leer el archivo:", error.message);
             } finally {
-                tempFile.removeCallback(); // Eliminar el archivo temporal
+                tempFile.removeCallback();
             }
         });
 
     } catch (error) {
-        res.status(500).json({ error: "Error en la descarga del archivo.", details: error.message });
+        console.error("Error en la descarga del archivo:", error.message);
     }
-});
+}
+
+async function processPaginated(fileUrl, sheetName, jsonData) {
+    const totalRows = jsonData.length;
+    let offset = 0;
+
+    while (offset < totalRows) {
+        const paginatedData = jsonData.slice(offset, offset + batchSize);
+        const hasNextPage = (offset + batchSize) < totalRows;
+
+        console.log({
+            sheet: sheetName,
+            totalRows,
+            batchSize,
+            hasNextPage,
+            nextPage: hasNextPage ? `/convert?fileUrl=${encodeURIComponent(fileUrl)}&offset=${offset + batchSize}` : null,
+            data: paginatedData.length
+        });
+
+        offset += batchSize;
+    }
+}
 
 // **Ruta para continuar la paginación**
 app.get("/convert", async (req, res) => {
     try {
         const { fileUrl, offset = 0 } = req.query;
-        const batchSize = 500;
-
         if (!fileUrl) return res.status(400).json({ error: "Debes proporcionar una URL válida." });
 
         const tempFile = tmp.fileSync({ postfix: ".xlsx" });
 
+        // Descargar el archivo sin bloquear la memoria
         const writer = fs.createWriteStream(tempFile.name);
         const response = await axios.get(fileUrl, { responseType: "stream" });
         response.data.pipe(writer);
@@ -87,22 +107,20 @@ app.get("/convert", async (req, res) => {
         writer.on("finish", () => {
             try {
                 const workbook = xlsx.readFile(tempFile.name);
-                const selectedSheet = workbook.SheetNames[0]; // Toma la primera hoja automáticamente
+                const selectedSheet = workbook.SheetNames[0]; // Primera hoja automáticamente
                 const sheet = workbook.Sheets[selectedSheet];
                 const jsonData = xlsx.utils.sheet_to_json(sheet);
 
                 const startIndex = parseInt(offset);
                 const paginatedData = jsonData.slice(startIndex, startIndex + batchSize);
-
-                const nextOffset = startIndex + batchSize;
-                const hasNextPage = nextOffset < jsonData.length;
+                const hasNextPage = (startIndex + batchSize) < jsonData.length;
 
                 res.json({
                     sheet: selectedSheet,
                     totalRows: jsonData.length,
                     batchSize,
                     hasNextPage,
-                    nextPage: hasNextPage ? `/convert?fileUrl=${encodeURIComponent(fileUrl)}&offset=${nextOffset}` : null,
+                    nextPage: hasNextPage ? `/convert?fileUrl=${encodeURIComponent(fileUrl)}&offset=${startIndex + batchSize}` : null,
                     data: paginatedData,
                 });
 
