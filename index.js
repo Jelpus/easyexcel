@@ -7,7 +7,7 @@ const tmp = require("tmp");
 const app = express();
 app.use(express.json());
 
-const batchSize = 500; // Tamaño de paginación para archivos grandes
+const batchSize = 500; // Número de filas por lote para archivos grandes
 
 app.post("/convert", async (req, res) => {
     try {
@@ -34,19 +34,25 @@ app.post("/convert", async (req, res) => {
                 const selectedSheet = sheets[0];
                 const sheet = workbook.Sheets[selectedSheet];
 
-                // Streaming para archivos grandes: Convierte fila por fila
-                let rows = [];
-                let rowIndex = 0;
-                for (let cell in sheet) {
-                    if (cell[0] === "!") continue; // Ignorar metadatos
-                    let row = sheet[cell].v; // Obtener valor
-                    rows[rowIndex] = rows[rowIndex] || [];
-                    rows[rowIndex].push(row);
-                    rowIndex++;
+                // 🔹 Extraer datos en formato de matriz (cada fila como array)
+                const rawData = xlsx.utils.sheet_to_json(sheet, { header: 1 });
+
+                // 🔹 Verificar si hay contenido
+                if (rawData.length < 2) {
+                    return res.status(400).json({ error: "El archivo no contiene datos suficientes." });
                 }
 
-                // Convertir a JSON con paginación
-                const jsonData = rows.map(row => ({ data: row }));
+                // 🔹 Tomar la primera fila como encabezados y convertir el resto a objetos
+                const headers = rawData[0]; // Primera fila = claves
+                const jsonData = rawData.slice(1).map(row => {
+                    let obj = {};
+                    row.forEach((cell, index) => {
+                        obj[headers[index] || `Column${index + 1}`] = cell || null;
+                    });
+                    return obj;
+                });
+
+                // 🔹 Aplicar paginación
                 const paginatedData = jsonData.slice(0, batchSize);
                 const hasNextPage = jsonData.length > batchSize;
 
