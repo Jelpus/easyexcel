@@ -7,40 +7,15 @@ const tmp = require("tmp");
 const app = express();
 app.use(express.json());
 
-const batchSize = 500; // Número de filas por lote
-
-// Memoria temporal (se elimina cuando la API reinicia)
-const processedFiles = {};
-
-// Endpoint para verificar si la API está viva
-app.get("/", (req, res) => {
-    res.json({ message: "API funcionando correctamente" });
-});
+const batchSize = 500; // Número de filas por lote para reducir consumo de RAM
 
 app.post("/convert", async (req, res) => {
     try {
         const { fileUrl } = req.body;
         if (!fileUrl) return res.status(400).json({ error: "Debes proporcionar una URL válida." });
 
-        const jobId = Date.now().toString();
-        processedFiles[jobId] = { status: "processing" };
-
-        // 🔹 Responder rápido para evitar timeout
-        res.json({ message: "Procesando archivo, consulta en 10s.", jobId });
-
-        // 🔹 Procesar en segundo plano con streaming
-        processFile(fileUrl, jobId);
-
-    } catch (error) {
-        res.status(500).json({ error: "Error al iniciar el procesamiento.", details: error.message });
-    }
-});
-
-async function processFile(fileUrl, jobId) {
-    try {
+        // 🔹 Descargar el archivo sin cargarlo en memoria
         const tempFile = tmp.fileSync({ postfix: ".xlsx" });
-
-        // 🔹 Descargar archivo sin consumir RAM
         const writer = fs.createWriteStream(tempFile.name);
         const response = await axios.get(fileUrl, { responseType: "stream" });
         response.data.pipe(writer);
@@ -49,62 +24,61 @@ async function processFile(fileUrl, jobId) {
             try {
                 const workbook = xlsx.readFile(tempFile.name, { dense: true });
                 const sheets = workbook.SheetNames;
-
                 if (sheets.length === 0) {
-                    processedFiles[jobId] = { error: "El archivo no contiene hojas válidas." };
-                    return;
+                    return res.status(400).json({ error: "El archivo Excel no contiene hojas válidas." });
                 }
 
                 const selectedSheet = sheets[0];
                 const sheet = workbook.Sheets[selectedSheet];
 
-                // 🔹 Procesar solo 500 filas a la vez (streaming real)
-                const rawData = xlsx.utils.sheet_to_json(sheet, { header: 1 });
+                // 🔹 Iniciar la respuesta en streaming
+                res.setHeader("Content-Type", "application/json");
+                res.write(`{"sheet": "${selectedSheet}", "data": [`);
 
+                const rawData = xlsx.utils.sheet_to_json(sheet, { header: 1 });
                 if (rawData.length < 2) {
-                    processedFiles[jobId] = { error: "El archivo no contiene datos suficientes." };
-                    return;
+                    return res.status(400).json({ error: "El archivo no contiene datos suficientes." });
                 }
 
                 const headers = rawData[0];
-                const jsonData = rawData.slice(1).map(row => {
-                    return headers.reduce((obj, header, index) => {
-                        obj[header || `Column${index + 1}`] = row[index] || null;
-                        return obj;
-                    }, {});
-                });
+                let firstRow = true;
+                let index = 0;
 
-                // 🔹 Guardar en memoria SOLO la primera parte (evita usar RAM en exceso)
-                processedFiles[jobId] = {
-                    sheet: selectedSheet,
-                    totalRows: jsonData.length,
-                    batchSize,
-                    hasNextPage: jsonData.length > batchSize,
-                    nextPage: jsonData.length > batchSize ? `/result/${jobId}?offset=${batchSize}` : null,
-                    data: jsonData.slice(0, batchSize),
-                };
+                function sendChunk() {
+                    while (index < rawData.length - 1) {
+                        const row = rawData[index + 1].reduce((obj, cell, i) => {
+                            obj[headers[i] || `Column${i + 1}`] = cell || null;
+                            return obj;
+                        }, {});
 
-                console.log(`✅ Archivo procesado correctamente: ${jobId}`);
+                        if (!firstRow) res.write(",");
+                        res.write(JSON.stringify(row));
+                        firstRow = false;
+
+                        index++;
+
+                        // 🔹 Si ya enviamos `batchSize`, hacer una pausa
+                        if (index % batchSize === 0) {
+                            setTimeout(sendChunk, 10);
+                            return;
+                        }
+                    }
+
+                    res.write("]}"); // 🔹 Cerrar JSON
+                    res.end();
+                    tempFile.removeCallback(); // 🔹 Eliminar archivo temporal
+                }
+
+                sendChunk(); // 🔹 Iniciar envío
 
             } catch (error) {
-                processedFiles[jobId] = { error: "Error procesando el archivo.", details: error.message };
-            } finally {
-                tempFile.removeCallback();
+                res.status(500).json({ error: "Error procesando el archivo.", details: error.message });
             }
         });
 
     } catch (error) {
-        processedFiles[jobId] = { error: "Error en la descarga del archivo.", details: error.message };
+        res.status(500).json({ error: "Error en la descarga del archivo.", details: error.message });
     }
-}
-
-// 🔹 Obtener resultado después de 10s
-app.get("/result/:jobId", (req, res) => {
-    const { jobId } = req.params;
-    if (!processedFiles[jobId]) {
-        return res.status(404).json({ error: "Archivo no encontrado o aún en proceso." });
-    }
-    res.json(processedFiles[jobId]);
 });
 
 // Iniciar servidor
