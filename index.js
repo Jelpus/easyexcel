@@ -7,7 +7,7 @@ const tmp = require("tmp");
 const app = express();
 app.use(express.json());
 
-const batchSize = 500; // Número de filas por lote
+const batchSize = 3000; // Número de filas por lote
 const fileSizeLimit = 5 * 1024 * 1024; // 5MB en bytes
 const processedFiles = {}; // Memoria temporal para almacenar resultados
 
