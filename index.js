@@ -3,9 +3,16 @@ const axios = require("axios");
 const xlsx = require("xlsx");
 const fs = require("fs");
 const tmp = require("tmp");
+const cors = require("cors");  // ✅ Importar cors
 
 const app = express();
 app.use(express.json());
+
+app.use(cors({
+    origin: "*",  // Permitir cualquier dominio (puedes cambiarlo a uno específico)
+    methods: ["GET", "POST"],
+    allowedHeaders: ["Content-Type"]
+}));
 
 const batchSize = 3000; // Número de filas por lote
 const fileSizeLimit = 5 * 1024 * 1024; // 5MB en bytes
