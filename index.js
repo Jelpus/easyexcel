@@ -10,6 +10,11 @@ app.use(express.json());
 const batchSize = 500; // Número de filas por lote
 const processedFiles = {}; // Memoria temporal para almacenar resultados
 
+// 🔹 Endpoint para verificar que la API está viva
+app.get("/", (req, res) => {
+    res.json({ message: "API funcionando correctamente" });
+});
+
 app.post("/convert", async (req, res) => {
     try {
         const { fileUrl } = req.body;
@@ -21,7 +26,7 @@ app.post("/convert", async (req, res) => {
         // 🔹 Responder rápido para evitar timeout
         res.json({ message: "Procesando archivo, consulta en 10s.", jobId });
 
-        processFile(fileUrl, jobId); // Ejecutar procesamiento en segundo plano
+        await processFile(fileUrl, jobId); // Ejecutar procesamiento en segundo plano
 
     } catch (error) {
         res.status(500).json({ error: "Error al iniciar el procesamiento.", details: error.message });
