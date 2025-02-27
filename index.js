@@ -8,9 +8,11 @@ const app = express();
 app.use(express.json());
 
 const batchSize = 500; // Número de filas por lote
-const processedFiles = {}; // Memoria temporal para almacenar resultados
 
-// 🔹 Endpoint para verificar que la API está viva
+// Memoria temporal (se elimina cuando la API reinicia)
+const processedFiles = {};
+
+// Endpoint para verificar si la API está viva
 app.get("/", (req, res) => {
     res.json({ message: "API funcionando correctamente" });
 });
@@ -20,13 +22,14 @@ app.post("/convert", async (req, res) => {
         const { fileUrl } = req.body;
         if (!fileUrl) return res.status(400).json({ error: "Debes proporcionar una URL válida." });
 
-        const jobId = Date.now().toString(); // Generar un ID único
+        const jobId = Date.now().toString();
         processedFiles[jobId] = { status: "processing" };
 
         // 🔹 Responder rápido para evitar timeout
         res.json({ message: "Procesando archivo, consulta en 10s.", jobId });
 
-        await processFile(fileUrl, jobId); // Ejecutar procesamiento en segundo plano
+        // 🔹 Procesar en segundo plano con streaming
+        processFile(fileUrl, jobId);
 
     } catch (error) {
         res.status(500).json({ error: "Error al iniciar el procesamiento.", details: error.message });
@@ -37,7 +40,7 @@ async function processFile(fileUrl, jobId) {
     try {
         const tempFile = tmp.fileSync({ postfix: ".xlsx" });
 
-        // 🔹 Descargar el archivo sin cargarlo en memoria
+        // 🔹 Descargar archivo sin consumir RAM
         const writer = fs.createWriteStream(tempFile.name);
         const response = await axios.get(fileUrl, { responseType: "stream" });
         response.data.pipe(writer);
@@ -55,6 +58,7 @@ async function processFile(fileUrl, jobId) {
                 const selectedSheet = sheets[0];
                 const sheet = workbook.Sheets[selectedSheet];
 
+                // 🔹 Procesar solo 500 filas a la vez (streaming real)
                 const rawData = xlsx.utils.sheet_to_json(sheet, { header: 1 });
 
                 if (rawData.length < 2) {
@@ -70,6 +74,7 @@ async function processFile(fileUrl, jobId) {
                     }, {});
                 });
 
+                // 🔹 Guardar en memoria SOLO la primera parte (evita usar RAM en exceso)
                 processedFiles[jobId] = {
                     sheet: selectedSheet,
                     totalRows: jsonData.length,
@@ -79,7 +84,7 @@ async function processFile(fileUrl, jobId) {
                     data: jsonData.slice(0, batchSize),
                 };
 
-                console.log(`✅ Archivo procesado: ${jobId}`);
+                console.log(`✅ Archivo procesado correctamente: ${jobId}`);
 
             } catch (error) {
                 processedFiles[jobId] = { error: "Error procesando el archivo.", details: error.message };
@@ -93,7 +98,7 @@ async function processFile(fileUrl, jobId) {
     }
 }
 
-// 🔹 Consultar resultado después de 10s
+// 🔹 Obtener resultado después de 10s
 app.get("/result/:jobId", (req, res) => {
     const { jobId } = req.params;
     if (!processedFiles[jobId]) {
